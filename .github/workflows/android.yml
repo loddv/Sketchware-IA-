@@ -16,6 +16,14 @@ on:
       - 'wip/**'
   workflow_dispatch:
     inputs:
+      build_type:
+        description: 'Tipo de build'
+        required: false
+        type: choice
+        options:
+          - release
+          - debug
+        default: release
       notifyTelegram:
         description: 'Executar notificação no Telegram (start)'
         required: false
@@ -26,6 +34,9 @@ on:
         required: false
         type: boolean
         default: true
+
+env:
+  BUILD_TYPE: ${{ github.event_name == 'workflow_dispatch' && inputs.build_type || 'release' }}
 
 jobs:
   notifyTelegram:
@@ -57,7 +68,6 @@ jobs:
     name: Clean up old artifacts
     runs-on: ubuntu-latest
     needs: notifyTelegram
-    # Executa mesmo se o notifyTelegram for pego/ignorado pelo input
     if: ${{ !failure() && !cancelled() }}
     permissions:
       actions: write
@@ -96,6 +106,9 @@ jobs:
     runs-on: ${{ vars.IS_USING_HOSTED_RUNNERS == 'true' && 'self-hosted' || 'ubuntu-latest' }}
     outputs:
       short_sha: ${{ steps.set_sha.outputs.short_sha }}
+      build_type: ${{ env.BUILD_TYPE }}
+    env:
+      BUILD_TYPE: ${{ github.event_name == 'workflow_dispatch' && inputs.build_type || 'release' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -116,19 +129,30 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
 
-      - name: Build Release APK
+      - name: Determine build task
+        id: build_task
+        run: |
+          if [ "$BUILD_TYPE" = "debug" ]; then
+            echo "task=assembleDebug" >> $GITHUB_OUTPUT
+            echo "output_dir=debug" >> $GITHUB_OUTPUT
+            echo "artifact_prefix=app-debug" >> $GITHUB_OUTPUT
+          else
+            echo "task=assembleRelease" >> $GITHUB_OUTPUT
+            echo "output_dir=release" >> $GITHUB_OUTPUT
+            echo "artifact_prefix=app-release" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build APK (${{ steps.build_task.outputs.task }})
         env:
           SKETCHUB_API_KEY: ${{ secrets.SKETCHUB_API_KEY }}
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-          # L8 needs more heap than the desktop-friendly project default (2 GB).
-          # Keep this override scoped to the hosted release build.
           GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx5g -Dfile.encoding=UTF-8 -XX:+UseParallelGC
         run: |
           chmod +x ./gradlew
-          ./gradlew --no-daemon --max-workers=1 assembleRelease
+          ./gradlew --no-daemon --max-workers=1 ${{ steps.build_task.outputs.task }}
 
       - name: Set short SHA
         id: set_sha
@@ -136,20 +160,20 @@ jobs:
 
       - name: Rename APK with commit hash
         run: |
-          mv app/build/outputs/apk/release/app-release.apk \
-             app/build/outputs/apk/release/app-release-${{ steps.set_sha.outputs.short_sha }}.apk
+          mv app/build/outputs/apk/${{ steps.build_task.outputs.output_dir }}/app-${{ steps.build_task.outputs.output_dir }}.apk \
+             app/build/outputs/apk/${{ steps.build_task.outputs.output_dir }}/${{ steps.build_task.outputs.artifact_prefix }}-${{ steps.set_sha.outputs.short_sha }}.apk
 
-      - name: Upload Release APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: apk-release-${{ steps.set_sha.outputs.short_sha }}
-          path: app/build/outputs/apk/release/app-release-${{ steps.set_sha.outputs.short_sha }}.apk
+          name: apk-${{ steps.build_task.outputs.output_dir }}-${{ steps.set_sha.outputs.short_sha }}
+          path: app/build/outputs/apk/${{ steps.build_task.outputs.output_dir }}/${{ steps.build_task.outputs.artifact_prefix }}-${{ steps.set_sha.outputs.short_sha }}.apk
 
   aggregateAndSend:
     name: Send APKs to Telegram
     runs-on: ${{ vars.IS_USING_HOSTED_RUNNERS == 'true' && 'self-hosted' || 'ubuntu-latest' }}
     needs: build
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.aggregateAndSend }}
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.aggregateAndSend) && needs.build.outputs.build_type == 'release' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -196,7 +220,7 @@ jobs:
     name: Publish APK to GitHub Releases
     runs-on: ${{ vars.IS_USING_HOSTED_RUNNERS == 'true' && 'self-hosted' || 'ubuntu-latest' }}
     needs: build
-    if: github.ref == 'refs/heads/main'
+    if: ${{ github.ref == 'refs/heads/main' && needs.build.outputs.build_type == 'release' }}
     permissions:
       contents: write
     steps:
