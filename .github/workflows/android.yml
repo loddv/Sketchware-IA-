@@ -58,7 +58,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: notifyTelegram
     # Executa mesmo se o notifyTelegram for pego/ignorado pelo input
-    if: ${{ !failed() && !cancelled() }}
+    if: ${{ !failure() && !cancelled() }}
     permissions:
       actions: write
     steps:
